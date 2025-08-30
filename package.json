@@ -1,0 +1,9 @@
+{
+  "name": "ai-backend-vercel",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "@supabase/supabase-js": "^2.45.0"
+  }
+}
