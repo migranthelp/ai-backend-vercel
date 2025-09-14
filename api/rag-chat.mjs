@@ -79,6 +79,47 @@ function routeIntent(text) {
   return 'app_data';
 }
 
+/* ---------- Intent (robust) ---------- */
+function tokenize(q) {
+  // unicode letters only → ["how","to","get","to","train","station","in","rabat"]
+  return (q.toLowerCase().match(/\p{L}+/gu) || []);
+}
+function hasAny(tokens, list) { return list.some(w => tokens.includes(w)); }
+function containsPhrase(q, phrase) {
+  return new RegExp(`(?:^|\\W)${phrase}(?:$|\\W)`, 'i').test(q);
+}
+
+function routeIntent(text) {
+  const q = (text || '').toLowerCase();
+  const toks = tokenize(q);
+
+  // 1) DIRECTIONS FIRST (so "train" can't be swallowed by weather)
+  const dirTokens = [
+    'bus','train','tram','direction','itinéraire','itineraire','route','transport',
+    'oncf','ctm','station','gare','محطة','طريق','كيف','أصل','القطار'
+  ];
+  const hasFromToEN = /(?:^|\W)from\s+.+\s+to\s+.+$/i.test(q);
+  const hasFromToFR = /(?:^|\W)de\s+.+\s+(?:à|a)\s+.+$/i.test(q);
+  const hasFromToAR = /من\s+.+\s+إلى\s+.+/i.test(text);
+  if (hasAny(toks, dirTokens) || hasFromToEN || hasFromToFR || hasFromToAR) {
+    return 'directions';
+  }
+
+  // 2) WEATHER (word-level, so "train" != "rain")
+  const weatherTokens = [
+    'weather','météo','meteo','forecast','pluie','température','طقس','الطقس','raining','rain'
+  ];
+  if (hasAny(toks, weatherTokens)) return 'weather';
+
+  // 3) WEB
+  const webPhrases = ['opening hours','latest','now','prix','price','reviews','review','what is','who is','خبر الآن','أحدث'];
+  if (webPhrases.some(p => containsPhrase(q, p))) return 'web';
+
+  // 4) default
+  return 'app_data';
+}
+
+
 /* ---------- External: Weather (Open-Meteo) ---------- */
 async function fetchWeather(cityName, lang = 'en') {
   const g = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(cityName)}&count=1&language=${lang}`);
