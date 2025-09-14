@@ -1,43 +1,46 @@
+// api/rag-chat.mjs
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createClient } from '@supabase/supabase-js';
 
+/* ---------- Models & Clients ---------- */
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 const embedModel = genAI.getGenerativeModel({ model: 'text-embedding-004' });
 
-// Primary chat model + fallback
-const CHAT_MODEL = process.env.CHAT_MODEL || 'gemini-1.5-flash'; // use flash by default for quota
+const CHAT_MODEL = process.env.CHAT_MODEL || 'gemini-1.5-flash'; // flash default = friendlier quotas
 const PRIMARY = genAI.getGenerativeModel({ model: CHAT_MODEL });
 const FALLBACK = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-// Domain guard settings
+const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE);
+
 const STRICT_DOMAIN = process.env.STRICT_DOMAIN === '1';
 const MIN_SIM = Number.isFinite(Number(process.env.MIN_SIM)) ? Number(process.env.MIN_SIM) : 0.22;
 
-const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE);
+const ORS_KEY = process.env.OPENROUTESERVICE_API_KEY;   // optional
+const SERPAPI_KEY = process.env.SERPAPI_API_KEY;        // optional
+const FRONTEND_APP_KEY = process.env.FRONTEND_APP_KEY;  // optional simple gate
 
+/* ---------- Helpers ---------- */
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-APP-KEY');
 }
 
 const systemStyle = (lang) => `
 You are the in-app assistant for "Migrant-e-s Help" in Morocco.
-Scope:
-- App data: services (cities/categories), news, CAN 2025 stadiums & places.
-- Allowed external tools (if allowExternal=true): city weather (Open-Meteo), simple directions, brief web search.
-If a question is outside both, refuse briefly and suggest 2–3 in-scope queries.
-Answer in ${lang}, concise, bullet points when helpful.
+Primary scope: app data (services + cities/categories, news, CAN 2025 stadiums & places).
+If allowExternal=true you may also answer: weather for a city, simple directions, brief web lookups.
+Stay concise, answer in ${lang}, prefer bullet points. If insufficient context, ask a brief follow-up.
 `.trim();
 
 function domainRefusal(lang) {
   switch (lang) {
     case 'fr':
-      return "Je peux aider avec les services de l’app, les actualités et CAN 2025. Activez les infos externes pour météo/itinéraires/recherche, ou demandez : « services de santé à Rabat », « stades CAN 2025 », etc.";
+      return "Je réponds en priorité avec les données de l’app (services, actualités, CAN 2025). Activez les infos externes pour la météo/itinéraires/recherche.";
     case 'ar':
-      return "أساعد في بيانات التطبيق والأخبار ومعلومات كأس إفريقيا 2025. فعّل المصادر الخارجية للمناخ/الاتجاهات/البحث أو جرّب: «خدمات صحية في الرباط»، «ملاعب كان 2025»…";
+      return "أجيب أولًا من بيانات التطبيق (الخدمات، الأخبار، كأس إفريقيا 2025). فعّل المصادر الخارجية للمناخ/الاتجاهات/البحث.";
     default:
-      return "I help with app services, news, and CAN 2025. Enable external info for weather/directions/search, or try: “health services in Rabat”, “CAN 2025 stadiums”…";
+      return "I answer primarily from the app’s data (services, news, CAN 2025). Enable external info for weather/directions/search.";
   }
 }
 
@@ -56,34 +59,28 @@ function getRetryDelayMs(err) {
 
 async function askModel(model, history) {
   const chat = await model.startChat({ history });
-  const result = await chat.sendMessage('Answer the last user message clearly. If you used external info, mention sources briefly.');
+  const result = await chat.sendMessage('Answer the last user message clearly. If you used external info, mention it briefly.');
   return result.response?.text() ?? '...';
 }
 
-/* ---------- Intent Router (cheap rules) ---------- */
+/* ---------- Intent (cheap rules) ---------- */
 function routeIntent(text) {
   const q = (text || '').toLowerCase();
 
-  // weather keywords
-  const weatherHits = ['weather', 'météo', 'température', 'forecast', 'pluie', 'rain', 'meteo', ' الطقس', 'طقس'];
-  if (weatherHits.some(k => q.includes(k))) return 'weather';
+  const weather = ['weather','météo','meteo','forecast','pluie','rain','température','طقس','الطقس'];
+  if (weather.some(k => q.includes(k))) return 'weather';
 
-  // directions/transport keywords
-  const transportHits = ['bus', 'train', 'tram', 'direction', 'itinéraire', 'itineraire', 'route', 'how to get', 'transport', 'oncf', 'ctm', 'station', 'gare', 'محطة', 'طريق'];
-  if (transportHits.some(k => q.includes(k))) return 'directions';
+  const dirs = ['bus','train','tram','direction','itinéraire','itineraire','route','transport','oncf','ctm','station','gare','محطة','طريق','كيف أصل','from ',' to '];
+  if (dirs.some(k => q.includes(k))) return 'directions';
 
-  // generic web search intent
-  const webHits = ['news now', 'latest', 'opening hours today', 'happening now', 'prix', 'price', 'reviews', 'review', 'what is', 'who is'];
-  if (webHits.some(k => q.includes(k))) return 'web';
+  const web = ['latest','now','opening hours','prix','price','reviews','review','what is','who is','خبر الآن','أحدث'];
+  if (web.some(k => q.includes(k))) return 'web';
 
-  // default to app data
   return 'app_data';
 }
 
-/* ---------- External Tools ---------- */
-// 1) Weather via Open-Meteo geocoding + forecast (no key)
+/* ---------- External: Weather (Open-Meteo) ---------- */
 async function fetchWeather(cityName, lang = 'en') {
-  // geocode
   const g = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(cityName)}&count=1&language=${lang}`);
   const gj = await g.json();
   const loc = gj?.results?.[0];
@@ -98,41 +95,110 @@ async function fetchWeather(cityName, lang = 'en') {
   const daily = wx.daily;
   const line1 = `Weather for ${name}, ${country}: ${cur?.temperature_2m}°C, wind ${cur?.wind_speed_10m} km/h.`;
   const line2 = daily ? `Today: min ${daily.temperature_2m_min?.[0]}°C / max ${daily.temperature_2m_max?.[0]}°C, precipitation ${daily.precipitation_sum?.[0]} mm.` : '';
+  return { text: [line1, line2].filter(Boolean).join('\n'), sources: [{ type: 'web', name: 'Open-Meteo', url }] };
+}
+
+/* ---------- External: Directions (OpenRouteService) ---------- */
+function parseFromTo(text) {
+  const t = (text || '').trim();
+  let m = t.match(/\bfrom\s+(.+?)\s+to\s+(.+?)$/i);               // EN
+  if (m) return { from: m[1].trim(), to: m[2].trim() };
+  m = t.match(/\bde\s+(.+?)\s+(?:à|a)\s+(.+?)$/i);                 // FR
+  if (m) return { from: m[1].trim(), to: m[2].trim() };
+  m = t.match(/من\s+(.+?)\s+إلى\s+(.+)$/i);                        // AR
+  if (m) return { from: m[1].trim(), to: m[2].trim() };
+  return null;
+}
+
+async function geocodeORS(query) {
+  const url = `https://api.openrouteservice.org/geocode/search?api_key=${ORS_KEY}&text=${encodeURIComponent(query)}&size=1`;
+  const r = await fetch(url);
+  const j = await r.json();
+  const f = j?.features?.[0];
+  if (!f) return null;
+  const [lng, lat] = f.geometry.coordinates;
+  return { lat, lng, name: f.properties.label };
+}
+
+async function directionsORS(origin, dest, profile = 'driving-car', lang = 'en') {
+  const url = `https://api.openrouteservice.org/v2/directions/${profile}?api_key=${ORS_KEY}&language=${lang}`;
+  const body = { coordinates: [[origin.lng, origin.lat],[dest.lng, dest.lat]], instructions: true, units: 'km' };
+  const r = await fetch(url, { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!j?.features?.[0]) return null;
+
+  const s = j.features[0].properties?.segments?.[0];
+  const dist = (s.distance/1000).toFixed(1);
+  const durMin = Math.round(s.duration/60);
+  const steps = (s.steps || []).slice(0, 6).map((st, i) => `${i+1}. ${st.instruction}`);
   return {
-    text: [line1, line2].filter(Boolean).join('\n'),
-    sources: [{ type: 'web', name: 'Open-Meteo', url }]
+    text: `Route: ${origin.name} → ${dest.name}\nDistance: ${dist} km, Duration: ~${durMin} min\n\nSteps:\n` + steps.join('\n'),
+    sources: [{ type:'web', name:'OpenRouteService', url:'https://openrouteservice.org/' }]
   };
 }
 
-// 2) Directions (stub): you can wire OpenRouteService or Google Directions.
-// Here we just return a polite placeholder until you add a key.
-async function fetchDirections(queryText, lang = 'en') {
+async function fetchDirectionsSmart(queryText, lang='en') {
+  if (!ORS_KEY) {
+    return {
+      text: lang === 'fr'
+        ? "Ajoutez OPENROUTESERVICE_API_KEY côté serveur pour obtenir des itinéraires réels (voiture/marche)."
+        : lang === 'ar'
+        ? "أضِف OPENROUTESERVICE_API_KEY على الخادم للحصول على مسارات فعلية (سيارة/سير)."
+        : "Add OPENROUTESERVICE_API_KEY on the server to get real routes (car/walking).",
+      sources: []
+    };
+  }
+  const ft = parseFromTo(queryText);
+  if (!ft) {
+    return {
+      text: lang === 'fr'
+        ? "Indiquez: « de [origine] à [destination] » (ex: de Rabat à Casablanca)."
+        : lang === 'ar'
+        ? "اكتب: « من [المكان] إلى [الوجهة] » (مثال: من الرباط إلى الدار البيضاء)."
+        : "Use: “from [origin] to [destination]” (e.g., from Rabat to Casablanca).",
+      sources: []
+    };
+  }
+  const [o, d] = await Promise.all([geocodeORS(ft.from), geocodeORS(ft.to)]);
+  if (!o || !d) return { text: "Couldn't geocode origin/destination. Try clearer place names.", sources: [] };
+  return await directionsORS(o, d, 'driving-car', lang) || { text: "No route found.", sources: [] };
+}
+
+/* ---------- External: Web (SerpAPI) ---------- */
+async function fetchWebSerp(queryText, lang='en') {
+  if (!SERPAPI_KEY) {
+    return {
+      text: lang === 'fr'
+        ? "Recherche web non configurée. Ajoutez SERPAPI_API_KEY."
+        : lang === 'ar'
+        ? "البحث على الويب غير مُفعّل. أضِف SERPAPI_API_KEY."
+        : "Web search not configured. Add SERPAPI_API_KEY.",
+      sources: []
+    };
+  }
+  const params = new URLSearchParams({
+    engine: 'google', q: queryText, hl: lang || 'en', gl: 'ma', num: '5', api_key: SERPAPI_KEY
+  });
+  const r = await fetch(`https://serpapi.com/search.json?${params.toString()}`);
+  const j = await r.json();
+  const items = (j.organic_results || []).slice(0,3).map(o => `• ${o.title}\n  ${o.link}\n  ${o.snippet || ''}`);
   return {
-    text: lang === 'fr'
-      ? "Pour les itinéraires en temps réel (bus/train/tram), j’ai besoin d’un service de directions. Ajoutez OPENROUTESERVICE_API_KEY ou GOOGLE_MAPS_API_KEY côté serveur et je donnerai des trajets précis."
-      : lang === 'ar'
-      ? "للحصول على مسارات دقيقة (حافلة/قطار/ترام)، أحتاج إلى مفتاح لخدمة الاتجاهات. أضِف OPENROUTESERVICE_API_KEY أو GOOGLE_MAPS_API_KEY على الخادم."
-      : "For real-time routes (bus/train/tram), please add OPENROUTESERVICE_API_KEY or GOOGLE_MAPS_API_KEY on the server and I’ll provide exact directions.",
-    sources: []
+    text: items.length ? `Top results:\n\n${items.join('\n\n')}` : 'No relevant results.',
+    sources: [{ type:'web', name:'Google (SerpAPI)', url:'https://serpapi.com' }]
   };
 }
 
-// 3) Web Search (stub): wire SerpAPI or Google CSE if you want.
-async function fetchWebSearch(queryText, lang = 'en') {
-  return {
-    text: lang === 'fr'
-      ? "Recherche web non configurée. Ajoutez SERPAPI_API_KEY ou un Google CSE et j’afficherai 2–3 liens fiables."
-      : lang === 'ar'
-      ? "البحث على الويب غير مُفعّل. أضِف SERPAPI_API_KEY أو Google CSE وسأعرض 2–3 روابط موثوقة."
-      : "Web search not configured. Add SERPAPI_API_KEY or a Google CSE and I’ll return 2–3 reliable links.",
-    sources: []
-  };
-}
-
+/* ---------- Handler ---------- */
 export default async function handler(req, res) {
   cors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'method_not_allowed' });
+
+  // Optional simple gate
+  if (FRONTEND_APP_KEY) {
+    const got = req.headers['x-app-key'];
+    if (!got || got !== FRONTEND_APP_KEY) return res.status(401).json({ error: 'unauthorized' });
+  }
 
   if (!process.env.GOOGLE_API_KEY) return res.status(500).json({ error: 'missing_GOOGLE_API_KEY' });
   if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE) {
@@ -147,17 +213,19 @@ export default async function handler(req, res) {
     // Save user turn
     if (chat_id) await sb.from('messages').insert({ chat_id, role: 'user', content: lastUser });
 
-    // Route intent
+    // Intent
     const intent = routeIntent(lastUser);
 
     /* ---------- External branches ---------- */
     if (intent !== 'app_data') {
       if (!allowExternal) {
-        return res.status(200).json({ output_text: domainRefusal(language), sources: [] });
+        const txt = domainRefusal(language);
+        if (chat_id) await sb.from('messages').insert({ chat_id, role: 'assistant', content: txt });
+        return res.status(200).json({ output_text: txt, sources: [] });
       }
 
       if (intent === 'weather') {
-        // Try to extract a city quickly (very naive: last token after "in"/"à"/"في")
+        // naive city grab: try token after "in/à/في", else whole query
         const m = lastUser.match(/\b(?:in|à|في)\s+([A-Za-zÀ-ÿ\u0600-\u06FF\s\-']{2,})$/i);
         const city = m ? m[1].trim() : lastUser;
         const w = await fetchWeather(city, language);
@@ -165,36 +233,40 @@ export default async function handler(req, res) {
           if (chat_id) await sb.from('messages').insert({ chat_id, role: 'assistant', content: w.text });
           return res.status(200).json({ output_text: w.text, sources: w.sources });
         }
-        // fallthrough to app_data if weather failed to find a place
+        // fall through to app_data if no city found
       }
 
       if (intent === 'directions') {
-        const d = await fetchDirections(lastUser, language);
+        const d = await fetchDirectionsSmart(lastUser, language);
         if (chat_id) await sb.from('messages').insert({ chat_id, role: 'assistant', content: d.text });
         return res.status(200).json({ output_text: d.text, sources: d.sources });
       }
 
       if (intent === 'web') {
-        const s = await fetchWebSearch(lastUser, language);
+        const s = await fetchWebSerp(lastUser, language);
         if (chat_id) await sb.from('messages').insert({ chat_id, role: 'assistant', content: s.text });
         return res.status(200).json({ output_text: s.text, sources: s.sources });
       }
     }
 
-    /* ---------- App-data RAG (your existing flow) ---------- */
+    /* ---------- App-data RAG ---------- */
     // 1) Embed
     const er = await embedModel.embedContent({ content: { parts: [{ text: lastUser }] } });
     const qvec = er.embedding.values;
 
-    // 2) RPCs
+    // 2) RPCs (tune counts)
     const [services, news, stadiums, places] = await Promise.all([
       sb.rpc('match_services',      { query_embedding: qvec, match_count: 6, city_id: filters.cityId ?? null, category_id: filters.categoryId ?? null }),
       sb.rpc('match_news',          { query_embedding: qvec, match_count: 3, category_id: filters.categoryId ?? null }),
       sb.rpc('match_can_stadiums',  { query_embedding: qvec, match_count: 3, city_id: filters.cityId ?? null }),
       sb.rpc('match_places_can',    { query_embedding: qvec, match_count: 4, city_id: filters.cityId ?? null }),
     ]);
+    if (services.error)  console.error('services rpc error', services.error);
+    if (news.error)      console.error('news rpc error', news.error);
+    if (stadiums.error)  console.error('stadiums rpc error', stadiums.error);
+    if (places.error)    console.error('places rpc error', places.error);
 
-    // Similarity gate
+    // 3) Similarity gate
     const sims = [
       ...(services.data ?? []).map(x => Number(x.similarity) || 0),
       ...(news.data ?? []).map(x => Number(x.similarity) || 0),
@@ -203,25 +275,19 @@ export default async function handler(req, res) {
     ];
     const bestSim = sims.length ? Math.max(...sims) : 0;
     const totalMatches = sims.filter(s => s > 0).length;
-
     if (STRICT_DOMAIN && (bestSim < MIN_SIM || totalMatches === 0)) {
       const txt = domainRefusal(language);
       if (chat_id) await sb.from('messages').insert({ chat_id, role: 'assistant', content: txt });
       return res.status(200).json({ output_text: txt, sources: [] });
     }
 
-    // Build concise context
+    // 4) Context
     const sec = (title, lines) => lines.length ? `\n${title}:\n${lines.join('\n')}` : '';
     const s1 = (services.data ?? []).map(h => `- ${trim(h.name_fr ?? h.name_en ?? h.name_ar ?? 'Service', 80)} @ ${trim(h.address ?? '', 80)} ${h.phone ? `(phone: ${trim(h.phone, 30)})` : ''}`);
     const s2 = (places.data ?? []).map(h => `- ${trim(h.name_fr ?? h.name_en ?? h.name_ar ?? '', 80)} (tourism)`);
     const s3 = (stadiums.data ?? []).map(h => `- ${trim(h.name_fr ?? h.name_en ?? h.name_ar ?? '', 80)} stadium${h.capacity ? `, capacity: ${trim(h.capacity, 20)}` : ''}`);
     const s4 = (news.data ?? []).map(h => `- ${trim(h.title_fr ?? h.title_en ?? h.title_ar ?? '', 100)}`);
-
-    const context =
-      sec('Services', s1) +
-      sec('Places to visit', s2) +
-      sec('CAN 2025 Stadiums', s3) +
-      sec('News', s4);
+    const context = sec('Services', s1) + sec('Places to visit', s2) + sec('CAN 2025 Stadiums', s3) + sec('News', s4);
 
     const history = [
       { role: 'user', parts: [{ text: systemStyle(language) }] },
@@ -229,7 +295,7 @@ export default async function handler(req, res) {
       ...messages.slice(-2).map(m => ({ role: m.role, parts: [{ text: m.content }]})),
     ];
 
-    // Ask model with fallback
+    // 5) Model w/ fallback
     let output;
     try {
       output = await askModel(PRIMARY, history);
