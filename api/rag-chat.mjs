@@ -63,25 +63,33 @@ async function askModel(model, history) {
   return result.response?.text() ?? '...';
 }
 
-/* ---------- Intent (cheap rules) ---------- */
-function routeIntent(text) {
-  const q = (text || '').toLowerCase();
-
-  const weather = ['weather','météo','meteo','forecast','pluie','rain','température','طقس','الطقس'];
-  if (weather.some(k => q.includes(k))) return 'weather';
-
-  const dirs = ['bus','train','tram','direction','itinéraire','itineraire','route','transport','oncf','ctm','station','gare','محطة','طريق','كيف أصل','from ',' to '];
-  if (dirs.some(k => q.includes(k))) return 'directions';
-
-  const web = ['latest','now','opening hours','prix','price','reviews','review','what is','who is','خبر الآن','أحدث'];
-  if (web.some(k => q.includes(k))) return 'web';
-
-  return 'app_data';
+/* ---------- Intent (robust) ---------- */
+function tokenize(q) {
+  // Unicode letters only → ["how","to","get","to","train","station","in","rabat"]
+  return (q.toLowerCase().match(/\p{L}+/gu) || []);
+}
+function hasAny(tokens, list) { return list.some(w => tokens.includes(w)); }
+function containsPhrase(q, phrase) {
+  return new RegExp(`(?:^|\\W)${phrase}(?:$|\\W)`, 'i').test(q);
 }
 
+function routeIntent(text) {
+  const q = (text || '').toLowerCase();
+  const toks = tokenize(q);
 
+  // 1) DIRECTIONS FIRST (so "train" won't trigger "rain")
+  const dirTokens = [
+    'bus','train','tram','direction','itinéraire','itineraire','route','transport',
+    'oncf','ctm','station','gare','محطة','طريق','كيف','أصل','القطار'
+  ];
+  const hasFromToEN = /(?:^|\W)from\s+.+\s+to\s+.+$/i.test(q);
+  const hasFromToFR = /(?:^|\W)de\s+.+\s+(?:à|a)\s+.+$/i.test(q);
+  const hasFromToAR = /من\s+.+\s+إلى\s+.+/i.test(text);
+  if (hasAny(toks, dirTokens) || hasFromToEN || hasFromToFR || hasFromToAR) {
+    return 'directions';
+  }
 
-  // 2) WEATHER (word-level, so "train" != "rain")
+  // 2) WEATHER (word-level)
   const weatherTokens = [
     'weather','météo','meteo','forecast','pluie','température','طقس','الطقس','raining','rain'
   ];
@@ -94,7 +102,6 @@ function routeIntent(text) {
   // 4) default
   return 'app_data';
 }
-
 
 /* ---------- External: Weather (Open-Meteo) ---------- */
 async function fetchWeather(cityName, lang = 'en') {
