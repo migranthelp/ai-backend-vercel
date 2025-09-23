@@ -1,7 +1,7 @@
 // api/rag-chat.mjs
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createClient } from '@supabase/supabase-js';
-
+//
 /* ---------- Models & Clients ---------- */
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 const embedModel = genAI.getGenerativeModel({ model: 'text-embedding-004' });
