@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createClient } from '@supabase/supabase-js';
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-const chatModel = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
+const chatModel = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 const embedModel = genAI.getGenerativeModel({ model: 'text-embedding-004' });
 
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE);
