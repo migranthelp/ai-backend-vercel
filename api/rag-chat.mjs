@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
-
+//
 /* ---------- Env & Clients ---------- */
 const FRONTEND_APP_KEY = process.env.FRONTEND_APP_KEY;            // REQUIRED
 const MAX_REQ_PER_IP_DAY = Number(process.env.MAX_REQ_PER_IP_DAY || 200);
