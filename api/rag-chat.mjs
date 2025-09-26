@@ -27,7 +27,7 @@ const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_R
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*'); 
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-APP-KEY');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-app-key');
 }
 
 /* ---------- Tiny rate limit ---------- */
