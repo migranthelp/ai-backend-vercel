@@ -1,5 +1,4 @@
 // Ensure Node runtime (Next.js Pages API)
-export const config = { runtime: 'nodejs' };
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createClient } from '@supabase/supabase-js';
