@@ -1,3 +1,4 @@
+export const config = { runtime: 'nodejs' }; // ensures Node runtime, not Edge
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
@@ -217,3 +218,17 @@ export default async function handler(req, res) {
     return res.status(code).json({ error: code === 429 ? 'rate_limited' : 'chat_failed', message: e.message });
   }
 }
+try {
+  const er = await embedModel.embedContent({ content: { parts: [{ text: lastUser }] } });
+  const qvec = er.embedding.values;
+} catch (e) {
+  console.error('EMBED ERROR', e?.status, e?.message, e); // shows 429/403/etc.
+  return res.status(500).json({ error: 'embed_failed', message: String(e?.message || e) });
+}
+
+const [services, news, stadiums, places] = await Promise.all([
+  sb.rpc('match_services', {...}).then(r => (r.error && console.error('RPC services', r.error), r)),
+  sb.rpc('match_news', {...}).then(r => (r.error && console.error('RPC news', r.error), r)),
+  sb.rpc('match_can_stadiums', {...}).then(r => (r.error && console.error('RPC stadiums', r.error), r)),
+  sb.rpc('match_places_can', {...}).then(r => (r.error && console.error('RPC places', r.error), r)),
+]);
